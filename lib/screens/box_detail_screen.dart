@@ -78,13 +78,6 @@ class BoxDetailScreen extends StatelessWidget {
                         label: 'Device ID',
                         value: box.deviceId ?? 'Not set',
                       ),
-                      const SizedBox(height: 8),
-                      _InfoRow(
-                        icon: box.isConnected ? Icons.check_circle : Icons.cloud_off,
-                        label: 'Status',
-                        value: box.isConnected ? '' : 'Offline',
-                        valueColor: box.isConnected ? Colors.green : Colors.grey,
-                      ),
                     ],
                   ),
                 ),

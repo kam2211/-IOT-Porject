@@ -15,7 +15,7 @@ class DailyRecordCard extends StatelessWidget {
     super.key,
     required this.date,
     required this.records,
-    required this.medicineBoxes,
+    this.medicineBoxes = const [],
   });
 
   @override
@@ -124,17 +124,11 @@ class DailyRecordCard extends StatelessWidget {
               itemCount: records.length,
               itemBuilder: (context, index) {
                 final record = records[index];
-                final box = medicineBoxes.firstWhere(
-                  (b) => b.id == record.medicineBoxId,
-                  orElse: () => MedicineBox(
-                    id: '',
-                    name: 'Unknown',
-                    boxNumber: 0,
-                    reminderTimes: [],
-                  ),
-                );
 
-                return _RecordTile(record: record, medicineBox: box);
+                return _RecordTile(
+                  record: record,
+                  medicineBoxes: medicineBoxes,
+                );
               },
             ),
           ],
@@ -183,9 +177,24 @@ class DailyRecordCard extends StatelessWidget {
 
 class _RecordTile extends StatelessWidget {
   final MedicineRecord record;
-  final MedicineBox medicineBox;
+  final List<MedicineBox> medicineBoxes;
 
-  const _RecordTile({required this.record, required this.medicineBox});
+  const _RecordTile({required this.record, required this.medicineBoxes});
+
+  // Get the medicine box for this record, or return a default if not found
+  MedicineBox get medicineBox {
+    try {
+      return medicineBoxes.firstWhere((b) => b.id == record.medicineBoxId);
+    } catch (e) {
+      // Return a default box with data from the record
+      return MedicineBox(
+        id: record.medicineBoxId,
+        name: record.name ?? 'Box 1',
+        boxNumber: record.boxNumber ?? 0,
+        reminderTimes: [],
+      );
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -193,7 +202,7 @@ class _RecordTile extends StatelessWidget {
       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
       leading: Icon(_getStatusIcon(), color: _getStatusColor(), size: 24),
       title: Text(
-        medicineBox.name,
+        record.name ?? 'Box 1',
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
       ),
@@ -202,7 +211,7 @@ class _RecordTile extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           Text(
-            'Scheduled: ${DateFormat('h:mm a').format(record.scheduledTime)}',
+            'Box ${record.boxNumber ?? 0} • Scheduled: ${DateFormat('h:mm a').format(record.scheduledTime)}',
             style: Theme.of(context).textTheme.bodySmall,
           ),
           if (record.isTaken && record.takenTime != null)
@@ -272,7 +281,7 @@ class _RecordTile extends StatelessWidget {
             child: OutlinedButton(
               onPressed: () async {
                 final esp32Service = context.read<ESP32Service>();
-                
+
                 // Check if ESP32 is connected
                 if (!esp32Service.isConnected) {
                   // Try to connect
@@ -290,13 +299,13 @@ class _RecordTile extends StatelessWidget {
                     return;
                   }
                 }
-                
+
                 // Blink the LED 2 times
                 final success = await esp32Service.blinkBoxLED(
                   medicineBox.boxNumber,
                   times: 2,
                 );
-                
+
                 ScaffoldMessenger.of(context).showSnackBar(
                   SnackBar(
                     content: Text(
@@ -312,10 +321,7 @@ class _RecordTile extends StatelessWidget {
               style: OutlinedButton.styleFrom(
                 foregroundColor: Colors.orange,
                 side: const BorderSide(color: Colors.orange),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 8,
-                  vertical: 6,
-                ),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
                 minimumSize: const Size(0, 32),
                 tapTargetSize: MaterialTapTargetSize.shrinkWrap,
               ),

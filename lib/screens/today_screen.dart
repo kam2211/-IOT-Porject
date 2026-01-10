@@ -25,7 +25,70 @@ class _TodayScreenState extends State<TodayScreen> {
       final provider = context.read<MedicineBoxProvider>();
       provider.loadMedicineBoxes();
       await provider.syncWithDevice();
+
+      // Set up box status change listener
+      final esp32Service = context.read<ESP32Service>();
+      esp32Service.onBoxStatusChanged = (data) {
+        _handleBoxStatusChanged(data);
+      };
     });
+  }
+
+  void _handleBoxStatusChanged(Map<String, dynamic> data) {
+    if (!mounted) return;
+
+    final medicineTaken = data['medicineTaken'] == true;
+    final weightLoss = data['weightLoss'] ?? 0;
+
+    // Show snackbar notification
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  medicineTaken ? Icons.check_circle : Icons.info,
+                  color: medicineTaken ? Colors.green : Colors.orange,
+                  size: 20,
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    medicineTaken ? '✓ Medicine Taken!' : '⚠ No Medicine Taken',
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 14,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              medicineTaken
+                  ? 'Medicine successfully detected (${weightLoss.toStringAsFixed(1)}g)'
+                  : 'Please mark as taken if you took the medicine manually',
+              style: const TextStyle(fontSize: 12),
+            ),
+          ],
+        ),
+        backgroundColor: medicineTaken ? Colors.green : Colors.orange,
+        duration: const Duration(seconds: 5),
+        action: medicineTaken
+            ? null
+            : SnackBarAction(
+                label: 'Mark Taken',
+                textColor: Colors.white,
+                onPressed: () {
+                  // Will be handled when user clicks - just close snackbar for now
+                  ScaffoldMessenger.of(context).hideCurrentSnackBar();
+                },
+              ),
+      ),
+    );
   }
 
   @override

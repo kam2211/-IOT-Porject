@@ -26,6 +26,10 @@ class _DeviceScreenState extends State<DeviceScreen> {
   Widget build(BuildContext context) {
     final esp32 = context.watch<ESP32Service>();
 
+    print(
+      '🖥️ DeviceScreen build - isConnected: ${esp32.isConnected}, devices: ${esp32.connectedDevices.length}, activeDevice: ${esp32.activeDevice?.name}',
+    );
+
     return Scaffold(
       appBar: AppBar(title: const Text('Device Connection'), centerTitle: true),
       body: SingleChildScrollView(
@@ -853,8 +857,22 @@ class _ManualConnectWidgetState extends State<_ManualConnectWidget> {
     });
 
     final esp32 = context.read<ESP32Service>();
-    esp32.setIpAddress(_ipController.text.trim());
+    final ipAddress = _ipController.text.trim();
+
+    // Set IP and test connection
+    esp32.setIpAddress(ipAddress);
     final success = await esp32.testConnection();
+
+    if (success) {
+      // Add device to connected devices list
+      esp32.addDevice(
+        ipAddress,
+        'Medicine Box', // Default name, can be renamed later
+        version: '1.0',
+      );
+      esp32.setActiveDevice(ipAddress);
+      esp32.startPolling();
+    }
 
     setState(() {
       _isConnecting = false;
@@ -863,16 +881,13 @@ class _ManualConnectWidgetState extends State<_ManualConnectWidget> {
           : '✗ Connection failed. Check IP and try again.';
     });
 
-    if (success) {
-      esp32.startPolling();
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('✓ Connected to ESP32!'),
-            backgroundColor: Colors.green,
-          ),
-        );
-      }
+    if (success && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('✓ Connected to ESP32!'),
+          backgroundColor: Colors.green,
+        ),
+      );
     }
   }
 }

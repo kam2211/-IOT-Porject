@@ -60,6 +60,9 @@ dependencies:
   # MQTT client for receiving medicine status updates
   mqtt_client: ^10.0.0
 
+  # Charts
+  fl_chart: ^0.69.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

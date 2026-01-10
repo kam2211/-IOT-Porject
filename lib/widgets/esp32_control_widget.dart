@@ -115,14 +115,6 @@ class _ESP32ControlWidgetState extends State<ESP32ControlWidget> {
                 const SizedBox(height: 12),
 
                 // Reset button
-                SizedBox(
-                  width: double.infinity,
-                  child: OutlinedButton.icon(
-                    onPressed: () => _resetStatus(context, esp32),
-                    icon: const Icon(Icons.restart_alt),
-                    label: const Text('Reset Medicine Taken Status'),
-                  ),
-                ),
                 const SizedBox(height: 8),
 
                 // Find Device button - toggle alarm
@@ -183,16 +175,18 @@ class _ESP32ControlWidgetState extends State<ESP32ControlWidget> {
   Future<void> _openBox(BuildContext context, ESP32Service esp32) async {
     // Get the first medicine box or use default box 1
     final provider = context.read<MedicineBoxProvider>();
-    final boxNumber = provider.medicineBoxes.isNotEmpty 
-        ? provider.medicineBoxes.first.boxNumber 
+    final boxNumber = provider.medicineBoxes.isNotEmpty
+        ? provider.medicineBoxes.first.boxNumber
         : 1;
-    
+
     print('📦 Opening box: $boxNumber');
     final success = await esp32.openBox(boxNumber: boxNumber);
     if (context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(success ? 'Box $boxNumber opened!' : 'Failed to open box'),
+          content: Text(
+            success ? 'Box $boxNumber opened!' : 'Failed to open box',
+          ),
           backgroundColor: success ? Colors.green : Colors.red,
         ),
       );
@@ -247,6 +241,89 @@ class _ESP32ControlWidgetState extends State<ESP32ControlWidget> {
         print('⚠️ medicineTaken is FALSE - no record will be created');
       }
 
+      // Show alert dialog with medicine status
+      if (context.mounted) {
+        showDialog(
+          context: context,
+          builder: (dialogContext) => AlertDialog(
+            title: Row(
+              children: [
+                Icon(
+                  medicineTaken ? Icons.check_circle : Icons.info,
+                  color: medicineTaken ? Colors.green : Colors.orange,
+                  size: 28,
+                ),
+                const SizedBox(width: 12),
+                Text(
+                  medicineTaken ? 'Medicine Taken ✓' : 'No Medicine Taken',
+                  style: TextStyle(
+                    color: medicineTaken ? Colors.green : Colors.orange,
+                  ),
+                ),
+              ],
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  medicineTaken
+                      ? 'Medicine successfully detected!'
+                      : 'No medicine was taken from the box.',
+                  style: const TextStyle(fontSize: 16),
+                ),
+                const SizedBox(height: 16),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: medicineTaken
+                        ? Colors.green.shade50
+                        : Colors.orange.shade50,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Details:',
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: medicineTaken ? Colors.green : Colors.orange,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        '• Weight Loss: ${weightLoss.toStringAsFixed(2)}g',
+                        style: const TextStyle(fontSize: 14),
+                      ),
+                      if (boxNumber != null)
+                        Text(
+                          '• Box Number: $boxNumber',
+                          style: const TextStyle(fontSize: 14),
+                        ),
+                      Text(
+                        '• Status: ${medicineTaken ? 'Recorded ✓' : 'Not recorded'}',
+                        style: const TextStyle(fontSize: 14),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext),
+                child: const Text('OK'),
+              ),
+            ],
+            backgroundColor: medicineTaken
+                ? Colors.green.shade50
+                : Colors.orange.shade50,
+          ),
+        );
+      }
+
+      // Also show snackbar as backup notification
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
@@ -255,6 +332,7 @@ class _ESP32ControlWidgetState extends State<ESP32ControlWidget> {
                 : 'Box closed. No medicine taken.',
           ),
           backgroundColor: medicineTaken ? Colors.green : Colors.orange,
+          duration: const Duration(seconds: 4),
         ),
       );
     } else {

@@ -37,6 +37,20 @@ class _MyAppState extends State<MyApp> {
     _reminderService = ReminderService(esp32Service: _esp32Service);
     _reminderService.initialize();
     _reminderService.startMonitoring();
+
+    // Auto-reconnect to last known device on app startup
+    _autoReconnectDevice();
+  }
+
+  // Auto-reconnect to last known device
+  void _autoReconnectDevice() async {
+    print('🔌 Attempting to auto-reconnect to last device...');
+    final connected = await _esp32Service.loadAndConnectToLastDevice();
+    if (connected) {
+      print('✅ Successfully auto-reconnected to device');
+    } else {
+      print('ℹ️ No previous connection found or device offline');
+    }
   }
 
   @override
@@ -168,6 +182,10 @@ class _ReminderUpdaterState extends State<_ReminderUpdater> {
           // Set provider if not already set (one-time initialization)
           widget.reminderService.setMedicineBoxProvider(provider);
         }
+
+        // Set reminder service on the provider for notification cancellation
+        provider.setReminderService(widget.reminderService);
+
         widget.reminderService.updateMedicineBoxes(provider.medicineBoxes);
         return widget.child;
       },

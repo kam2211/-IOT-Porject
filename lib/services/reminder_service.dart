@@ -105,6 +105,40 @@ class ReminderService {
     }
   }
 
+  bool _isMedicineMarkedAsMissed(MedicineBox box, ReminderTime reminder) {
+    if (_medicineBoxProvider == null) {
+      return false;
+    }
+
+    try {
+      final todayRecords = _medicineBoxProvider!.getTodayRecords();
+      final matchingRecord = todayRecords.firstWhere(
+        (record) =>
+            record.medicineBoxId == box.id &&
+            record.reminderTimeId == reminder.id,
+        orElse: () => MedicineRecord(
+          id: '',
+          medicineBoxId: '',
+          reminderTimeId: '',
+          scheduledTime: DateTime.now(),
+        ),
+      );
+
+      if (matchingRecord.id.isEmpty) {
+        return false;
+      }
+
+      final isMissed = matchingRecord.isMissed;
+      if (isMissed) {
+        print('   Found record: ${matchingRecord.id}, isMissed: $isMissed');
+      }
+      return isMissed;
+    } catch (e) {
+      print('⚠️ Error checking if medicine is missed: $e');
+      return false;
+    }
+  }
+
   // Start checking for reminders every minute
   void startMonitoring() {
     stopMonitoring();
@@ -139,6 +173,11 @@ class ReminderService {
       '🔍 Checking reminders at ${now.hour}:${now.minute} (Day: $currentDay)',
     );
     print('📦 Medicine boxes count: ${_medicineBoxes.length}');
+
+    // Check and create overdue records on each reminder check cycle
+    if (_medicineBoxProvider != null) {
+      _medicineBoxProvider!.checkAndCreateOverdueRecords();
+    }
 
     for (final box in _medicineBoxes) {
       for (final reminder in box.reminderTimes) {
@@ -200,6 +239,26 @@ class ReminderService {
       timer,
     ) async {
       stage++;
+
+      // Check if medicine is already taken or missed (manually or via IoT)
+      if (_isMedicineAlreadyTaken(box, reminder)) {
+        print('✅ Medicine taken detected! Stopping escalation.');
+        timer.cancel();
+        _activeEscalations.remove(reminderId);
+        _notificationCounts.remove(reminderId);
+        await _turnOffBoxLED(box); // Turn off LED when medicine is taken
+        return;
+      }
+
+      // Check if medicine is marked as missed
+      if (_isMedicineMarkedAsMissed(box, reminder)) {
+        print('⚠️ Medicine marked as missed! Stopping escalation.');
+        timer.cancel();
+        _activeEscalations.remove(reminderId);
+        _notificationCounts.remove(reminderId);
+        await _turnOffBoxLED(box); // Turn off LED when marked missed
+        return;
+      }
 
       // Check if box was opened via IoT
       if (await _checkIfBoxOpened()) {
@@ -263,6 +322,37 @@ class ReminderService {
     }
 
     await _showNotification(title: title, body: body, id: id);
+  }
+
+  // Cancel notification for a specific reminder
+  Future<void> cancelNotification(
+    String medicineBoxId,
+    String reminderId,
+  ) async {
+    // Generate the same ID used when showing the notification
+    final notificationId = (medicineBoxId + reminderId).hashCode;
+
+    try {
+      await _notifications.cancel(notificationId);
+      print(
+        '✅ Cancelled notification for $medicineBoxId - $reminderId (ID: $notificationId)',
+      );
+
+      // Also remove from triggered reminders and active escalations
+      final remindersToRemove = _triggeredReminders
+          .where((r) => r.startsWith('${medicineBoxId}_$reminderId'))
+          .toList();
+      for (final reminder in remindersToRemove) {
+        _triggeredReminders.remove(reminder);
+      }
+
+      // Cancel active escalation timer if any
+      final escalationKey = '${medicineBoxId}_${reminderId}_escalation';
+      _activeEscalations[escalationKey]?.cancel();
+      _activeEscalations.remove(escalationKey);
+    } catch (e) {
+      print('❌ Error cancelling notification: $e');
+    }
   }
 
   // Show local notification

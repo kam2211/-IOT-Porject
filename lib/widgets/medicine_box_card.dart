@@ -1,17 +1,26 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import '../models/medicine_box.dart';
 import '../screens/box_detail_screen.dart';
+import '../services/esp32_service.dart';
 
 class MedicineBoxCard extends StatelessWidget {
   final MedicineBox medicineBox;
 
-  const MedicineBoxCard({
-    super.key,
-    required this.medicineBox,
-  });
+  const MedicineBoxCard({super.key, required this.medicineBox});
 
   @override
   Widget build(BuildContext context) {
+    // Check if ESP32 is connected to this medicine box's device
+    final esp32 = context.watch<ESP32Service>();
+    final isDeviceConnected =
+        esp32.isConnected &&
+        medicineBox.deviceId != null &&
+        medicineBox.deviceId!.isNotEmpty &&
+        (esp32.ipAddress?.contains(medicineBox.deviceId!) ?? false);
+
+    // Use either the real-time connection status or the stored status
+    final isConnected = isDeviceConnected || medicineBox.isConnected;
     return Card(
       margin: const EdgeInsets.only(bottom: 16),
       child: InkWell(
@@ -55,9 +64,12 @@ class MedicineBoxCard extends StatelessWidget {
                         const SizedBox(height: 4),
                         Text(
                           'Box #${medicineBox.boxNumber}',
-                          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                            color: Theme.of(context).colorScheme.onSurface.withAlpha(153),
-                          ),
+                          style: Theme.of(context).textTheme.bodyMedium
+                              ?.copyWith(
+                                color: Theme.of(
+                                  context,
+                                ).colorScheme.onSurface.withAlpha(153),
+                              ),
                         ),
                       ],
                     ),
@@ -68,7 +80,7 @@ class MedicineBoxCard extends StatelessWidget {
                       vertical: 6,
                     ),
                     decoration: BoxDecoration(
-                      color: medicineBox.isConnected
+                      color: isConnected
                           ? Colors.green.withAlpha(51)
                           : Colors.grey.withAlpha(51),
                       borderRadius: BorderRadius.circular(16),
@@ -77,21 +89,16 @@ class MedicineBoxCard extends StatelessWidget {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Icon(
-                          medicineBox.isConnected
-                              ? Icons.check_circle
-                              : Icons.cloud_off,
+                          isConnected ? Icons.wifi : Icons.wifi_off,
                           size: 16,
-                          color: medicineBox.isConnected
-                              ? Colors.green
-                              : Colors.grey,
+                          color: isConnected ? Colors.green : Colors.grey,
                         ),
                         const SizedBox(width: 4),
                         Text(
-                          medicineBox.isConnected ? '' : 'Offline',
+                          isConnected ? 'Connected' : 'Not Connected',
                           style: TextStyle(
-                            color: medicineBox.isConnected
-                                ? Colors.green
-                                : Colors.grey,
+                            fontSize: 12,
+                            color: isConnected ? Colors.green : Colors.grey,
                             fontWeight: FontWeight.w500,
                           ),
                         ),

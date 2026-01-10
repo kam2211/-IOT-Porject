@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 import 'firestore_device_service.dart';
 
 class ESP32Status {
@@ -68,6 +69,9 @@ class ESP32Service extends ChangeNotifier {
   ConnectedDevice? _activeDevice;
   String? _currentDeviceName;
 
+  // Callbacks for box status changes
+  Function(Map<String, dynamic>)? onBoxStatusChanged;
+
   // Getters
   String? get ipAddress => _ipAddress;
   bool get isConnected => _isConnected;
@@ -90,34 +94,114 @@ class ESP32Service extends ChangeNotifier {
 
   // Add a new device with custom name
   void addDevice(String ip, String name, {String version = '1.0'}) {
-    // Check if device already exists
-    final existingIndex = _connectedDevices.indexWhere((d) => d.ip == ip);
+    // Normalize IP: remove 'http://' prefix if present
+    String normalizedIp = ip.trim();
+    if (normalizedIp.startsWith('http://')) {
+      normalizedIp = normalizedIp.replaceAll('http://', '');
+    }
+
+    // Check if device already exists (compare normalized IPs)
+    final existingIndex = _connectedDevices.indexWhere((d) {
+      String deviceIp = d.ip.startsWith('http://')
+          ? d.ip.replaceAll('http://', '')
+          : d.ip;
+      return deviceIp == normalizedIp;
+    });
+
     if (existingIndex >= 0) {
       // Update existing device name
       _connectedDevices[existingIndex].name = name;
     } else {
-      // Add new device
+      // Add new device (store without http:// prefix)
       _connectedDevices.add(
-        ConnectedDevice(ip: ip, name: name, version: version),
+        ConnectedDevice(ip: normalizedIp, name: name, version: version),
       );
       // Push to Firestore
       FirestoreDeviceService().addDevice(
-        deviceId: ip.replaceAll('.', '_'), // Use IP as ID
+        deviceId: normalizedIp.replaceAll('.', '_'), // Use IP as ID
         name: name,
-        ip: ip,
+        ip: normalizedIp,
       );
     }
+    // Save last used device
+    _saveLastConnectedDevice(normalizedIp, name);
     notifyListeners();
+  }
+
+  // Save last connected device to SharedPreferences
+  Future<void> _saveLastConnectedDevice(String ip, String name) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('last_connected_device_ip', ip);
+      await prefs.setString('last_connected_device_name', name);
+      print('💾 Saved last connected device: $name ($ip)');
+    } catch (e) {
+      print('❌ Error saving last connected device: $e');
+    }
+  }
+
+  // Load last connected device from SharedPreferences and auto-connect
+  Future<bool> loadAndConnectToLastDevice() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final lastIp = prefs.getString('last_connected_device_ip');
+      final lastName = prefs.getString('last_connected_device_name');
+
+      if (lastIp != null && lastIp.isNotEmpty) {
+        print('🔄 Auto-reconnecting to last device: $lastName ($lastIp)');
+        setIpAddress(lastIp, deviceName: lastName);
+
+        // Test the connection
+        final connected = await testConnection();
+        if (connected) {
+          // Ensure device exists in list and is set active
+          addDevice(lastIp, lastName ?? 'Medicine Box');
+          setActiveDevice(lastIp);
+          print('✅ Auto-reconnected to $lastName');
+          return true;
+        } else {
+          print(
+            '⚠️ Could not auto-reconnect to $lastName (device may be offline)',
+          );
+          return false;
+        }
+      }
+      return false;
+    } catch (e) {
+      print('❌ Error loading last connected device: $e');
+      return false;
+    }
+  }
+
+  // Clear saved connection (when disconnecting intentionally)
+  Future<void> clearSavedConnection() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('last_connected_device_ip');
+      await prefs.remove('last_connected_device_name');
+      print('🧹 Cleared saved connection');
+    } catch (e) {
+      print('❌ Error clearing saved connection: $e');
+    }
   }
 
   // Set active device by IP
   void setActiveDevice(String ip) {
+    // Normalize IP for comparison
+    String normalizedIp = ip.trim();
+    if (normalizedIp.startsWith('http://')) {
+      normalizedIp = normalizedIp.replaceAll('http://', '');
+    }
+
     for (var device in _connectedDevices) {
-      device.isActive = device.ip == ip;
+      String deviceIp = device.ip.startsWith('http://')
+          ? device.ip.replaceAll('http://', '')
+          : device.ip;
+      device.isActive = deviceIp == normalizedIp;
       if (device.isActive) {
         _activeDevice = device;
         _currentDeviceName = device.name;
-        setIpAddress(ip, deviceName: device.name);
+        setIpAddress(device.ip, deviceName: device.name);
       }
     }
     notifyListeners();
@@ -125,14 +209,29 @@ class ESP32Service extends ChangeNotifier {
 
   // Rename a device
   void renameDevice(String ip, String newName) {
-    final device = _connectedDevices.firstWhere(
-      (d) => d.ip == ip,
-      orElse: () => ConnectedDevice(ip: '', name: ''),
-    );
+    // Normalize IP for comparison
+    String normalizedIp = ip.trim();
+    if (normalizedIp.startsWith('http://')) {
+      normalizedIp = normalizedIp.replaceAll('http://', '');
+    }
+
+    final device = _connectedDevices.firstWhere((d) {
+      String deviceIp = d.ip.startsWith('http://')
+          ? d.ip.replaceAll('http://', '')
+          : d.ip;
+      return deviceIp == normalizedIp;
+    }, orElse: () => ConnectedDevice(ip: '', name: ''));
     if (device.ip.isNotEmpty) {
       device.name = newName;
-      if (_activeDevice?.ip == ip) {
-        _currentDeviceName = newName;
+      // Check if active device was renamed
+      String? activeIp = _activeDevice?.ip;
+      if (activeIp != null) {
+        String normalizedActiveIp = activeIp.startsWith('http://')
+            ? activeIp.replaceAll('http://', '')
+            : activeIp;
+        if (normalizedActiveIp == normalizedIp) {
+          _currentDeviceName = newName;
+        }
       }
       notifyListeners();
     }
@@ -140,11 +239,30 @@ class ESP32Service extends ChangeNotifier {
 
   // Remove a device
   void removeDevice(String ip) {
-    _connectedDevices.removeWhere((d) => d.ip == ip);
-    if (_activeDevice?.ip == ip) {
-      _activeDevice = null;
-      _currentDeviceName = null;
-      _isConnected = false;
+    // Normalize IP for comparison
+    String normalizedIp = ip.trim();
+    if (normalizedIp.startsWith('http://')) {
+      normalizedIp = normalizedIp.replaceAll('http://', '');
+    }
+
+    _connectedDevices.removeWhere((d) {
+      String deviceIp = d.ip.startsWith('http://')
+          ? d.ip.replaceAll('http://', '')
+          : d.ip;
+      return deviceIp == normalizedIp;
+    });
+
+    // Check if active device was removed
+    String? activeIp = _activeDevice?.ip;
+    if (activeIp != null) {
+      String normalizedActiveIp = activeIp.startsWith('http://')
+          ? activeIp.replaceAll('http://', '')
+          : activeIp;
+      if (normalizedActiveIp == normalizedIp) {
+        _activeDevice = null;
+        _currentDeviceName = null;
+        _isConnected = false;
+      }
     }
     notifyListeners();
   }
@@ -170,6 +288,15 @@ class ESP32Service extends ChangeNotifier {
         _isConnected = true;
         _error = null;
         _lastStatus = ESP32Status.fromJson(json.decode(response.body));
+
+        // Ensure current IP is tracked as a connected device
+        final existingIndex = _connectedDevices.indexWhere(
+          (d) => d.ip == _ipAddress,
+        );
+        if (existingIndex == -1) {
+          addDevice(_ipAddress!, _currentDeviceName ?? 'Medicine Box');
+        }
+        setActiveDevice(_ipAddress!);
 
         // Update active device status
         if (_activeDevice != null) {
@@ -276,6 +403,12 @@ class ESP32Service extends ChangeNotifier {
         if (data['success'] == true) {
           _error = null;
           await getStatus(); // Refresh status
+
+          // Trigger callback with box status
+          if (onBoxStatusChanged != null) {
+            onBoxStatusChanged!(data);
+          }
+
           return data;
         }
       }
@@ -556,6 +689,7 @@ class ESP32Service extends ChangeNotifier {
     stopPolling();
     _isConnected = false;
     _lastStatus = null;
+    clearSavedConnection(); // Clear saved connection when manually disconnecting
     notifyListeners();
   }
 

@@ -49,20 +49,6 @@ class _AddMedicineBoxScreenState extends State<AddMedicineBoxScreen> {
     }
   }
 
-  void _updateSelectedDeviceIfInvalid(List<String> validDeviceIds) {
-    if (_selectedDeviceId != null &&
-        !validDeviceIds.contains(_selectedDeviceId) &&
-        validDeviceIds.isNotEmpty) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) {
-          setState(() {
-            _selectedDeviceId = validDeviceIds.first;
-          });
-        }
-      });
-    }
-  }
-
   @override
   void dispose() {
     _nameController.dispose();
@@ -221,17 +207,36 @@ class _AddMedicineBoxScreenState extends State<AddMedicineBoxScreen> {
                         );
                       }
 
-                      // Ensure selected device ID is valid
+                      // Build device IP list (normalized, without http://)
                       final validDeviceIds = devices
-                          .map((d) => d.ip.replaceAll('http://', ''))
+                          .map((d) => d.ip.replaceAll('http://', '').trim())
                           .toList();
 
-                      // Update selected device if invalid (outside of build)
-                      _updateSelectedDeviceIfInvalid(validDeviceIds);
+                      // Normalize selected device ID for comparison
+                      String? normalizedSelectedId;
+                      if (_selectedDeviceId != null) {
+                        normalizedSelectedId = _selectedDeviceId!
+                            .replaceAll('http://', '')
+                            .trim();
+                      }
+
+                      // Ensure selected device ID is valid
+                      if (normalizedSelectedId != null &&
+                          !validDeviceIds.contains(normalizedSelectedId)) {
+                        WidgetsBinding.instance.addPostFrameCallback((_) {
+                          if (mounted) {
+                            setState(() {
+                              _selectedDeviceId = validDeviceIds.isNotEmpty
+                                  ? validDeviceIds.first
+                                  : null;
+                            });
+                          }
+                        });
+                      }
 
                       final currentValue =
-                          validDeviceIds.contains(_selectedDeviceId)
-                          ? _selectedDeviceId
+                          validDeviceIds.contains(normalizedSelectedId)
+                          ? normalizedSelectedId
                           : (devices.isNotEmpty ? validDeviceIds.first : null);
 
                       return SizedBox(

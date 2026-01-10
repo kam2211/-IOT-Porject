@@ -6,6 +6,8 @@ class MedicineRecord {
   final DateTime? takenTime;
   final bool isTaken;
   final bool isMissed;
+  final String? name;
+  final int? boxNumber;
 
   MedicineRecord({
     required this.id,
@@ -15,6 +17,8 @@ class MedicineRecord {
     this.takenTime,
     this.isTaken = false,
     this.isMissed = false,
+    this.name,
+    this.boxNumber,
   });
 
   MedicineRecord copyWith({
@@ -25,6 +29,8 @@ class MedicineRecord {
     DateTime? takenTime,
     bool? isTaken,
     bool? isMissed,
+    String? name,
+    int? boxNumber,
   }) {
     return MedicineRecord(
       id: id ?? this.id,
@@ -34,6 +40,8 @@ class MedicineRecord {
       takenTime: takenTime ?? this.takenTime,
       isTaken: isTaken ?? this.isTaken,
       isMissed: isMissed ?? this.isMissed,
+      name: name ?? this.name,
+      boxNumber: boxNumber ?? this.boxNumber,
     );
   }
 
@@ -46,6 +54,8 @@ class MedicineRecord {
       'takenTime': takenTime?.toIso8601String(),
       'isTaken': isTaken,
       'isMissed': isMissed,
+      'name': name,
+      'boxNumber': boxNumber,
     };
   }
 
@@ -81,6 +91,8 @@ class MedicineRecord {
           : null,
       isTaken: json['isTaken'] == true,
       isMissed: json['isMissed'] == true,
+      name: json['name'] as String?,
+      boxNumber: json['boxNumber'] as int?,
     );
   }
 

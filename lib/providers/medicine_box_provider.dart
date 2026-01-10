@@ -3,6 +3,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import '../models/medicine_box.dart';
 import '../models/medicine_record.dart';
 import '../services/esp32_service.dart';
+import '../services/reminder_service.dart';
 import 'dart:async';
 
 class MedicineBoxProvider extends ChangeNotifier {
@@ -29,6 +30,59 @@ class MedicineBoxProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Create an overdue record in the database for a past scheduled dose that wasn't taken
+  Future<void> _createOverdueRecord(
+    String medicineBoxId,
+    String reminderTimeId,
+    DateTime scheduledTime,
+    MedicineBox? boxInfo,
+  ) async {
+    try {
+      // Check if record already exists to avoid duplicates
+      final existing = await _firestore
+          .collection('medicineRecords')
+          .where('medicineBoxId', isEqualTo: medicineBoxId)
+          .where('reminderTimeId', isEqualTo: reminderTimeId)
+          .where('scheduledTime', isEqualTo: Timestamp.fromDate(scheduledTime))
+          .get();
+
+      if (existing.docs.isNotEmpty) {
+        print(
+          '⏭️ Overdue record already exists for $medicineBoxId/$reminderTimeId at $scheduledTime',
+        );
+        return;
+      }
+
+      // Create overdue placeholder record
+      final overdueRecord = MedicineRecord(
+        id: 'overdue_${medicineBoxId}_${reminderTimeId}_${scheduledTime}',
+        medicineBoxId: medicineBoxId,
+        reminderTimeId: reminderTimeId,
+        scheduledTime: scheduledTime,
+        isTaken: false,
+        isMissed: false,
+        name: boxInfo?.name,
+        boxNumber: boxInfo?.boxNumber,
+      );
+
+      await _firestore.collection('medicineRecords').add({
+        'medicineBoxId': medicineBoxId,
+        'reminderTimeId': reminderTimeId,
+        'scheduledTime': Timestamp.fromDate(scheduledTime),
+        'isTaken': false,
+        'isMissed': false,
+        'name': boxInfo?.name,
+        'boxNumber': boxInfo?.boxNumber,
+      });
+
+      print(
+        '✅ Created overdue record placeholder for $medicineBoxId/$reminderTimeId at $scheduledTime',
+      );
+    } catch (e) {
+      print('❌ Error creating overdue record: $e');
+    }
+  }
+
   /// Fetch today's medicine records directly from Firestore and merge with dynamic schedule
   Future<List<MedicineRecord>> fetchTodayRecordsFromDatabase() async {
     final now = DateTime.now();
@@ -47,10 +101,7 @@ class MedicineBoxProvider extends ChangeNotifier {
 
     final dbRecords = snapshot.docs.map((doc) {
       final data = doc.data();
-      // Ensure the document ID is included in the record
       data['id'] = doc.id;
-
-      // Properly parse the record, handling both Timestamp and string formats
       final record = MedicineRecord(
         id: data['id'] ?? doc.id,
         medicineBoxId: data['medicineBoxId'] ?? '',
@@ -73,33 +124,65 @@ class MedicineBoxProvider extends ChangeNotifier {
     // Generate today's schedule from reminders
     final todaySchedule = _generateTodayScheduleFromReminders();
 
-    // Merge: DB records override schedule, schedule fills gaps
+    // Merge: DB records override schedule, schedule fills gaps for both past and future times
     final Map<String, MedicineRecord> mergedRecords = {};
 
-    // Add all scheduled doses (from reminders)
+    // Process all scheduled doses (both past and future)
     for (var schedule in todaySchedule) {
       final key = '${schedule.medicineBoxId}_${schedule.reminderTimeId}';
-      mergedRecords[key] = schedule;
+
+      // Check if we already have a DB record for this dose
+      final existingRecord = dbRecords.firstWhere(
+        (r) =>
+            r.medicineBoxId == schedule.medicineBoxId &&
+            r.reminderTimeId == schedule.reminderTimeId,
+        orElse: () => MedicineRecord(
+          id: 'none',
+          medicineBoxId: '',
+          reminderTimeId: '',
+          scheduledTime: DateTime.now(),
+        ),
+      );
+
+      if (existingRecord.id != 'none') {
+        // Use existing DB record
+        mergedRecords[key] = existingRecord;
+        print(
+          '📋 Using existing DB record: key=$key, isTaken=${existingRecord.isTaken}',
+        );
+      } else if (schedule.scheduledTime.isAfter(now)) {
+        // Add future scheduled dose (not yet taken)
+        mergedRecords[key] = schedule;
+        print(
+          '📋 Adding future scheduled dose: key=$key, time=${schedule.scheduledTime}',
+        );
+      } else {
+        // Past dose without DB record - add to merged (don't create in DB)
+        mergedRecords[key] = schedule;
+        print(
+          '⏭️ Past dose without DB record: key=$key - showing from schedule',
+        );
+      }
     }
 
-    // Override with actual records from DB (taken or missed)
+    // Ensure all DB records are included (in case some don't match schedule)
     for (var record in dbRecords) {
       final key = '${record.medicineBoxId}_${record.reminderTimeId}';
-      mergedRecords[key] = record;
-      print(
-        '📋 Merging DB record from Firestore: key=$key, isTaken=${record.isTaken}, id=${record.id}',
-      );
+      if (!mergedRecords.containsKey(key)) {
+        mergedRecords[key] = record;
+        print(
+          '📋 Adding orphaned DB record: key=$key, isTaken=${record.isTaken}',
+        );
+      }
     }
 
     // Also merge local records (these might be more recent than Firestore due to eventual consistency)
-    // Use startOfDay and endOfDay that are already calculated above
     for (var record in _medicineRecords) {
       if (record.scheduledTime.isAfter(
             startOfDay.subtract(const Duration(seconds: 1)),
           ) &&
           record.scheduledTime.isBefore(endOfDay)) {
         final key = '${record.medicineBoxId}_${record.reminderTimeId}';
-        // Local records take precedence over Firestore records (they're more recent)
         mergedRecords[key] = record;
         print(
           '📋 Merging local record: key=$key, isTaken=${record.isTaken}, id=${record.id}',
@@ -113,22 +196,106 @@ class MedicineBoxProvider extends ChangeNotifier {
     print(
       '📊 Total merged records: ${result.length}, Taken: ${result.where((r) => r.isTaken).length}',
     );
-    for (var r in result) {
-      print(
-        '  - ${r.id}: isTaken=${r.isTaken}, box=${r.medicineBoxId}, reminder=${r.reminderTimeId}',
-      );
-    }
 
     return result;
   }
 
+  /// Fetch medicine records from Firestore for a date range (for reports)
+  /// Groups by TAKEN date when available, otherwise uses SCHEDULED date
+  Future<List<MedicineRecord>> fetchRecordsForDateRangeFromDatabase(
+    DateTime startDate,
+    DateTime endDate,
+  ) async {
+    try {
+      // Fetch all records in the date range from Firestore
+      final snapshot = await _firestore
+          .collection('medicineRecords')
+          .where(
+            'scheduledTime',
+            isGreaterThanOrEqualTo: Timestamp.fromDate(startDate),
+          )
+          .where(
+            'scheduledTime',
+            isLessThan: Timestamp.fromDate(
+              endDate.add(const Duration(days: 1)),
+            ),
+          )
+          .get();
+
+      final records = snapshot.docs.map((doc) {
+        final data = doc.data();
+        data['id'] = doc.id;
+
+        // Get medicine box info for context
+        final medicineBoxId = data['medicineBoxId'] ?? '';
+        final boxInfo = _medicineBoxes.firstWhere(
+          (b) => b.id == medicineBoxId,
+          orElse: () => MedicineBox(
+            id: medicineBoxId,
+            name: 'Unknown',
+            boxNumber: 0,
+            reminderTimes: [],
+          ),
+        );
+
+        return MedicineRecord(
+          id: data['id'] ?? doc.id,
+          medicineBoxId: medicineBoxId,
+          reminderTimeId: data['reminderTimeId'] ?? '',
+          scheduledTime: _parseFirestoreDate(data['scheduledTime']),
+          takenTime: data['takenTime'] != null
+              ? _parseFirestoreDate(data['takenTime'])
+              : null,
+          isTaken: data['isTaken'] == true || data['isTaken'] == 'true',
+          isMissed: data['isMissed'] == true || data['isMissed'] == 'true',
+          name: data['name'] ?? boxInfo.name,
+          boxNumber: data['boxNumber'] ?? boxInfo.boxNumber,
+        );
+      }).toList();
+
+      print(
+        '📥 Fetched ${records.length} records from Firestore for date range',
+      );
+
+      // Keep all records - we now have name and boxNumber stored in Firestore,
+      // so orphaned records (from deleted boxes) can still be displayed
+      // Just use the data from the record itself
+      final displayRecords = records;
+
+      // Sort by taken time (if available) then by scheduled time
+      displayRecords.sort((a, b) {
+        final dateA = a.isTaken && a.takenTime != null
+            ? a.takenTime!
+            : a.scheduledTime;
+        final dateB = b.isTaken && b.takenTime != null
+            ? b.takenTime!
+            : b.scheduledTime;
+        return dateB.compareTo(dateA); // Descending (newest first)
+      });
+
+      return displayRecords;
+    } catch (e) {
+      print('❌ Error fetching records from Firestore: $e');
+      return [];
+    }
+  }
+
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   StreamSubscription<QuerySnapshot>? _medicineBoxesSubscription;
+  ReminderService? _reminderService;
 
   List<MedicineBox> _medicineBoxes = [];
   final List<MedicineRecord> _medicineRecords = [];
   bool _isLoading = false;
   String? _error;
+
+  // Flag to load today's records only once
+  bool _todayRecordsLoaded = false;
+
+  // Set the reminder service after initialization
+  void setReminderService(ReminderService reminderService) {
+    _reminderService = reminderService;
+  }
 
   List<MedicineBox> get medicineBoxes => _medicineBoxes;
   List<MedicineRecord> get medicineRecords => _medicineRecords;
@@ -168,13 +335,25 @@ class MedicineBoxProvider extends ChangeNotifier {
 
   // Get records for a specific date range
   // For today's records, includes scheduled doses that haven't been created as records yet
+  // FILTERS OUT orphaned records (records referencing deleted medicine boxes)
   List<MedicineRecord> getRecordsForDateRange(DateTime start, DateTime end) {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final todayEnd = today.add(const Duration(days: 1));
 
+    // Get valid medicine box IDs to filter orphaned records
+    final validBoxIds = _medicineBoxes.map((box) => box.id).toSet();
+
     // Get records from database for the date range
     final dbRecords = _medicineRecords.where((record) {
+      // Filter out records for non-existent medicine boxes (orphaned records)
+      if (!validBoxIds.contains(record.medicineBoxId)) {
+        print(
+          '⚠️ Skipping orphaned record: ${record.id} (box ${record.medicineBoxId} not found)',
+        );
+        return false;
+      }
+
       return record.scheduledTime.isAfter(
             start.subtract(const Duration(days: 1)),
           ) &&
@@ -258,6 +437,8 @@ class MedicineBoxProvider extends ChangeNotifier {
               scheduledTime: scheduledTime,
               isTaken: false,
               isMissed: false,
+              name: box.name,
+              boxNumber: box.boxNumber,
             ),
           );
         }
@@ -341,6 +522,7 @@ class MedicineBoxProvider extends ChangeNotifier {
   }
 
   // Mark medicine as taken - creates record if it doesn't exist
+  // Handles overdue records by finding them in Firestore if not in local cache
   Future<void> markAsTaken(
     String recordId, {
     MedicineBox? box,
@@ -348,6 +530,8 @@ class MedicineBoxProvider extends ChangeNotifier {
   }) async {
     final now = DateTime.now();
     final todayDate = DateTime(now.year, now.month, now.day);
+    final startOfDay = DateTime(now.year, now.month, now.day);
+    final endOfDay = startOfDay.add(const Duration(days: 1));
     MedicineRecord? record;
 
     // Try to find existing record in DB
@@ -355,38 +539,74 @@ class MedicineBoxProvider extends ChangeNotifier {
     if (index != -1) {
       record = _medicineRecords[index];
     } else {
-      // If record doesn't exist, we need box and reminder to create it
-      if (box != null && reminder != null) {
-        final scheduledTime = DateTime(
-          now.year,
-          now.month,
-          now.day,
-          reminder.hour,
-          reminder.minute,
-        );
-        // Generate proper record ID (not schedule ID)
-        final newRecordId =
-            'record_${box.id}_${reminder.id}_${todayDate.millisecondsSinceEpoch}';
-        record = MedicineRecord(
-          id: newRecordId,
-          medicineBoxId: box.id,
-          reminderTimeId: reminder.id,
-          scheduledTime: scheduledTime,
-          isTaken: false,
-          isMissed: false,
-        );
-      } else {
-        // Try to find from today's schedule by matching recordId or key
-        final todayRecords = getTodayRecords();
-        final scheduleRecord = todayRecords.firstWhere(
-          (r) => r.id == recordId,
-          orElse: () =>
-              throw Exception('Record not found in today\'s schedule'),
-        );
-        // Generate proper record ID from schedule record
-        final newRecordId =
-            'record_${scheduleRecord.medicineBoxId}_${scheduleRecord.reminderTimeId}_${todayDate.millisecondsSinceEpoch}';
-        record = scheduleRecord.copyWith(id: newRecordId);
+      // If record doesn't exist locally, try to find it in Firestore (could be an overdue record)
+      try {
+        final firestoreRecord = await _firestore
+            .collection('medicineRecords')
+            .doc(recordId)
+            .get();
+
+        if (firestoreRecord.exists) {
+          final data = firestoreRecord.data();
+          if (data != null) {
+            record = MedicineRecord(
+              id: firestoreRecord.id,
+              medicineBoxId: data['medicineBoxId'] ?? '',
+              reminderTimeId: data['reminderTimeId'] ?? '',
+              scheduledTime: _parseFirestoreDate(data['scheduledTime']),
+              takenTime: data['takenTime'] != null
+                  ? _parseFirestoreDate(data['takenTime'])
+                  : null,
+              isTaken: data['isTaken'] == true || data['isTaken'] == 'true',
+              isMissed: data['isMissed'] == true || data['isMissed'] == 'true',
+              name: data['name'] as String?,
+              boxNumber: data['boxNumber'] as int?,
+            );
+            print('✅ Found overdue record in Firestore: $recordId');
+          }
+        }
+      } catch (e) {
+        print('⚠️ Error fetching record from Firestore: $e');
+      }
+
+      // If still not found, try to create it
+      if (record == null) {
+        // If record doesn't exist, we need box and reminder to create it
+        if (box != null && reminder != null) {
+          final scheduledTime = DateTime(
+            now.year,
+            now.month,
+            now.day,
+            reminder.hour,
+            reminder.minute,
+          );
+          // Generate proper record ID (not schedule ID)
+          final newRecordId =
+              'record_${box.id}_${reminder.id}_${todayDate.millisecondsSinceEpoch}';
+          record = MedicineRecord(
+            id: newRecordId,
+            medicineBoxId: box.id,
+            reminderTimeId: reminder.id,
+            scheduledTime: scheduledTime,
+            isTaken: false,
+            isMissed: false,
+            name: box.name,
+            boxNumber: box.boxNumber,
+          );
+        } else {
+          // Try to find from today's schedule by matching recordId or key
+          final todayRecords = getTodayRecords();
+          final scheduleRecord = todayRecords.firstWhere(
+            (r) => r.id == recordId,
+            orElse: () => throw Exception(
+              'Record not found in today\'s schedule or Firestore',
+            ),
+          );
+          // Generate proper record ID from schedule record
+          final newRecordId =
+              'record_${scheduleRecord.medicineBoxId}_${scheduleRecord.reminderTimeId}_${todayDate.millisecondsSinceEpoch}';
+          record = scheduleRecord.copyWith(id: newRecordId);
+        }
       }
     }
 
@@ -436,14 +656,30 @@ class MedicineBoxProvider extends ChangeNotifier {
         'isMissed': takenRecord.isMissed,
         if (takenRecord.takenTime != null)
           'takenTime': Timestamp.fromDate(takenRecord.takenTime!),
+        'name': takenRecord.name,
+        'boxNumber': takenRecord.boxNumber,
       };
-      await _firestore
-          .collection('medicineRecords')
-          .doc(finalRecordId)
-          .set(firestoreData);
-      print(
-        '✅ Saved taken record to Firestore: $finalRecordId, isTaken: ${takenRecord.isTaken}',
-      );
+
+      // For overdue records (those starting with 'overdue_'), update the existing document instead of creating new one
+      if (recordId.startsWith('overdue_')) {
+        await _firestore.collection('medicineRecords').doc(recordId).update({
+          'isTaken': takenRecord.isTaken,
+          'takenTime': Timestamp.fromDate(takenRecord.takenTime!),
+          'isMissed': takenRecord.isMissed,
+        });
+        print(
+          '✅ Updated overdue record in Firestore: $recordId, isTaken: ${takenRecord.isTaken}',
+        );
+      } else {
+        // For regular/schedule records, set/create with the ID
+        await _firestore
+            .collection('medicineRecords')
+            .doc(finalRecordId)
+            .set(firestoreData);
+        print(
+          '✅ Saved taken record to Firestore: $finalRecordId, isTaken: ${takenRecord.isTaken}',
+        );
+      }
 
       // Ensure the taken record is in local list (already updated above, but ensure it's there)
       final existingIndex = _medicineRecords.indexWhere(
@@ -469,6 +705,18 @@ class MedicineBoxProvider extends ChangeNotifier {
       // Even if Firestore fails, keep the local update so UI reflects the change
     }
 
+    // Cancel notification for this reminder
+    try {
+      if (_reminderService != null) {
+        await _reminderService!.cancelNotification(
+          takenRecord.medicineBoxId,
+          takenRecord.reminderTimeId,
+        );
+      }
+    } catch (e) {
+      print('⚠️ Error cancelling notification: $e');
+    }
+
     // Notify listeners immediately so UI updates
     notifyListeners();
   }
@@ -491,6 +739,18 @@ class MedicineBoxProvider extends ChangeNotifier {
             .set(updatedRecord.toJson());
       } catch (e) {
         print('Error saving missed status to Firestore: $e');
+      }
+
+      // Cancel notification for this reminder when marked as missed
+      try {
+        if (_reminderService != null) {
+          await _reminderService!.cancelNotification(
+            updatedRecord.medicineBoxId,
+            updatedRecord.reminderTimeId,
+          );
+        }
+      } catch (e) {
+        print('⚠️ Error cancelling notification: $e');
       }
 
       notifyListeners();
@@ -732,11 +992,11 @@ class MedicineBoxProvider extends ChangeNotifier {
               _error = null;
               notifyListeners();
 
-              // Load today's records from Firestore to get taken/missed status
-              _loadTodayRecordsFromFirestore();
-
-              // Check immediately if any records should be marked as missed (for overdue reminders)
-              _checkAndCreateMissedRecords();
+              // Load today's records only ONCE on first app start
+              if (!_todayRecordsLoaded) {
+                _todayRecordsLoaded = true;
+                _loadTodayRecordsFromFirestore();
+              }
             },
             onError: (error) {
               _error = 'Failed to load medicine boxes: $error';
@@ -795,9 +1055,20 @@ class MedicineBoxProvider extends ChangeNotifier {
         data['id'] = doc.id; // Ensure document ID is included
 
         // Properly parse the record, handling both Timestamp and string formats
+        final medicineBoxId = data['medicineBoxId'] ?? '';
+        final boxInfo = _medicineBoxes.firstWhere(
+          (b) => b.id == medicineBoxId,
+          orElse: () => MedicineBox(
+            id: medicineBoxId,
+            name: 'Unknown',
+            boxNumber: 0,
+            reminderTimes: [],
+          ),
+        );
+
         final firestoreRecord = MedicineRecord(
           id: data['id'] ?? doc.id,
-          medicineBoxId: data['medicineBoxId'] ?? '',
+          medicineBoxId: medicineBoxId,
           reminderTimeId: data['reminderTimeId'] ?? '',
           scheduledTime: _parseFirestoreDate(data['scheduledTime']),
           takenTime: data['takenTime'] != null
@@ -805,6 +1076,8 @@ class MedicineBoxProvider extends ChangeNotifier {
               : null,
           isTaken: data['isTaken'] == true || data['isTaken'] == 'true',
           isMissed: data['isMissed'] == true || data['isMissed'] == 'true',
+          name: data['name'] ?? boxInfo.name,
+          boxNumber: data['boxNumber'] ?? boxInfo.boxNumber,
         );
 
         final key =
@@ -895,6 +1168,8 @@ class MedicineBoxProvider extends ChangeNotifier {
           scheduledTime: scheduled.scheduledTime,
           isTaken: false,
           isMissed: true,
+          name: scheduled.name,
+          boxNumber: scheduled.boxNumber,
         );
 
         print('❌ Creating missed record: $missedRecordId');
@@ -910,6 +1185,8 @@ class MedicineBoxProvider extends ChangeNotifier {
                 'scheduledTime': Timestamp.fromDate(missedRecord.scheduledTime),
                 'isTaken': false,
                 'isMissed': true,
+                'name': missedRecord.name,
+                'boxNumber': missedRecord.boxNumber,
               });
           _medicineRecords.add(missedRecord);
           missedCount++;
@@ -963,82 +1240,9 @@ class MedicineBoxProvider extends ChangeNotifier {
     }
   }
 
-  // Check and create missed records for overdue reminders (called on app start and throughout the day)
-  Future<void> _checkAndCreateMissedRecords() async {
-    try {
-      final now = DateTime.now();
-      final todayDate = DateTime(now.year, now.month, now.day);
-
-      // Get all scheduled doses for today from reminders
-      final todaySchedule = _generateTodayScheduleFromReminders();
-
-      // Get existing records from DB for today
-      final existingRecords = await fetchTodayRecordsFromDatabase();
-      final existingKeys = existingRecords
-          .map((r) => '${r.medicineBoxId}_${r.reminderTimeId}')
-          .toSet();
-
-      // Get valid medicine box IDs
-      final validBoxIds = _medicineBoxes.map((b) => b.id).toSet();
-      print('🔍 Valid medicine box IDs: $validBoxIds');
-
-      // Create missed records for any scheduled doses that are overdue and not taken
-      for (var scheduled in todaySchedule) {
-        // SAFETY CHECK: Only create if medicine box still exists
-        if (!validBoxIds.contains(scheduled.medicineBoxId)) {
-          print(
-            '⚠️ Skipping missed record - medicine box ${scheduled.medicineBoxId} not found!',
-          );
-          continue;
-        }
-
-        // Only check if the scheduled time has passed
-        if (scheduled.scheduledTime.isBefore(now)) {
-          final key = '${scheduled.medicineBoxId}_${scheduled.reminderTimeId}';
-
-          // Only create missed record if no record exists (not taken)
-          if (!existingKeys.contains(key)) {
-            final missedRecord = MedicineRecord(
-              id: 'record_${scheduled.medicineBoxId}_${scheduled.reminderTimeId}_${todayDate.millisecondsSinceEpoch}',
-              medicineBoxId: scheduled.medicineBoxId,
-              reminderTimeId: scheduled.reminderTimeId,
-              scheduledTime: scheduled.scheduledTime,
-              isTaken: false,
-              isMissed: true,
-            );
-
-            // Save to Firestore
-            try {
-              await _firestore
-                  .collection('medicineRecords')
-                  .doc(missedRecord.id)
-                  .set({
-                    'medicineBoxId': missedRecord.medicineBoxId,
-                    'reminderTimeId': missedRecord.reminderTimeId,
-                    'scheduledTime': Timestamp.fromDate(
-                      missedRecord.scheduledTime,
-                    ),
-                    'isTaken': false,
-                    'isMissed': true,
-                  });
-              _medicineRecords.add(missedRecord);
-              print(
-                '📝 Created missed record for overdue reminder: ${missedRecord.id}',
-              );
-            } catch (e) {
-              print('Error creating missed record: $e');
-            }
-          }
-        }
-      }
-
-      notifyListeners();
-    } catch (e) {
-      print('Error in _checkAndCreateMissedRecords: $e');
-    }
-  }
-
   // Schedule daily check for missed records at 23:55
+  // Note: Overdue records (not taken, not missed) will remain as overdue indefinitely
+  // They won't auto-convert to missed. Users must manually take or mark them as missed.
   Timer? _dailyMissedCheckTimer;
 
   void _scheduleDailyMissedCheck() {
@@ -1051,17 +1255,17 @@ class MedicineBoxProvider extends ChangeNotifier {
     );
 
     // For TESTING: run check in 2 minutes (change to 23:55 for production)
-    var targetTime = now.add(const Duration(minutes: 7));
-    print('🧪 TEST MODE: Will check for missed records in 7 minutes');
+    // var targetTime = now.add(const Duration(minutes: 2));
+    // print('🧪 TEST MODE: Will check for missed records in 2 minutes');
 
     // For PRODUCTION: run at 23:55 daily
     // Uncomment the following lines for production:
-    // final today = DateTime(now.year, now.month, now.day);
-    // var targetTime = today.add(const Duration(hours: 23, minutes: 55));
-    // if (targetTime.isBefore(now)) {
-    //    targetTime = targetTime.add(const Duration(days: 1));
-    //   print('⏰ 23:55 already passed today, scheduling for tomorrow');
-    // }
+    final today = DateTime(now.year, now.month, now.day);
+    var targetTime = today.add(const Duration(hours: 23, minutes: 55));
+    if (targetTime.isBefore(now)) {
+      targetTime = targetTime.add(const Duration(days: 1));
+      print('⏰ 23:55 already passed today, scheduling for tomorrow');
+    }
 
     var delay = targetTime.difference(now);
 
@@ -1354,6 +1558,8 @@ class MedicineBoxProvider extends ChangeNotifier {
           takenTime: now,
           isTaken: true,
           isMissed: false,
+          name: medicineBox.name,
+          boxNumber: medicineBox.boxNumber,
         );
 
         print('✅ Creating manual record: $newRecordId');
@@ -1393,6 +1599,60 @@ class MedicineBoxProvider extends ChangeNotifier {
     } catch (e) {
       print('❌ Error in recordMedicineTaken: $e');
       rethrow;
+    }
+  }
+
+  /// Check and create overdue records for past scheduled doses that weren't taken
+  /// Called periodically to ensure database records exist for all scheduled doses
+  Future<void> checkAndCreateOverdueRecords() async {
+    try {
+      print('🔍 Checking for overdue records to create...');
+      final now = DateTime.now();
+      final today = DateTime(now.year, now.month, now.day);
+
+      // Get today's schedule from enabled reminders
+      final todaySchedule = _generateTodayScheduleFromReminders();
+      print('📅 Today\'s schedule count: ${todaySchedule.length}');
+
+      // Get existing records from DB for today
+      final existingRecords = await fetchTodayRecordsFromDatabase();
+      print('📦 Existing records count: ${existingRecords.length}');
+
+      // For each scheduled dose, check if record exists and is in the past
+      for (var scheduled in todaySchedule) {
+        // Check if a record already exists for this scheduled dose
+        final existingRecord = existingRecords.firstWhere(
+          (r) =>
+              r.medicineBoxId == scheduled.medicineBoxId &&
+              r.reminderTimeId == scheduled.reminderTimeId,
+          orElse: () => MedicineRecord(
+            id: 'none',
+            medicineBoxId: '',
+            reminderTimeId: '',
+            scheduledTime: DateTime.now(),
+          ),
+        );
+
+        // If no record exists and the scheduled time has passed, create an overdue record
+        if (existingRecord.id == 'none' &&
+            scheduled.scheduledTime.isBefore(now)) {
+          final boxInfo = _medicineBoxes.firstWhere(
+            (b) => b.id == scheduled.medicineBoxId,
+            orElse: () =>
+                MedicineBox(id: '', name: '', boxNumber: 0, reminderTimes: []),
+          );
+          await _createOverdueRecord(
+            scheduled.medicineBoxId,
+            scheduled.reminderTimeId,
+            scheduled.scheduledTime,
+            boxInfo.id.isNotEmpty ? boxInfo : null,
+          );
+        }
+      }
+
+      print('✅ Overdue records check completed');
+    } catch (e) {
+      print('❌ Error in checkAndCreateOverdueRecords: $e');
     }
   }
 }
