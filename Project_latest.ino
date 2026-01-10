@@ -103,11 +103,6 @@ float getCorrectedWeight(int samples = 10) {
   float rawWeight = scale.get_units(samples);
   float correctedWeight = rawWeight * weightMultiplier;
   
-  // Convert negative weight to positive (hardcoded fix for inverted sensor)
-  if (correctedWeight < 0) {
-    correctedWeight = abs(correctedWeight);
-  }
-  
   return correctedWeight;
 }
 
