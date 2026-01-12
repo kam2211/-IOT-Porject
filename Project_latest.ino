@@ -7,8 +7,8 @@
 #include <ESPmDNS.h>
 
 // ================= WIFI & MQTT =================
-const char* ssid = "Uhuk";
-const char* password = "kam1234@";
+const char* ssid = "Wifi_name";
+const char* password = "Wifi_password";
 const char* deviceName = "medicinebox";
 const char* mqtt_server = "34.19.178.165";
 const int mqtt_port = 1883;
